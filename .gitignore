@@ -1,0 +1,15 @@
+# ESP-IDF build artifacts
+**/build/
+**/.cache/
+**/dependencies.lock
+**/managed_components/
+
+# ESP-IDF component directory (referenced, not owned)
+**/components/components/
+
+# Python
+**/__pycache__/
+**/*.pyc
+
+# VS Code
+**/.vscode/
