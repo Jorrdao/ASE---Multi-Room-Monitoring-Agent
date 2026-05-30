@@ -31,7 +31,7 @@
 #define DHT20_ADDR          0x38
 
 /* ── LDR ─────────────────────────────────────────────────────────────── */
-#define LDR_ADC_CHANNEL     ADC_CHANNEL_2
+#define LDR_ADC_CHANNEL     ADC_CHANNEL_1
 #define LDR_ADC_UNIT        ADC_UNIT_1
 #define LDR_ADC_ATTEN       ADC_ATTEN_DB_12
 
