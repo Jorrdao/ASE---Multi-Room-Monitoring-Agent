@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Room Monitor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg:         #faf9f7;
+      --surface:    #ffffff;
+      --border:     #ede9e3;
+      --text:       #1c1917;
+      --muted:      #a8a29e;
+      --orange:     #ea580c;
+      --cold:       #0284c7;
+      --cold-lt:    #e0f2fe;
+      --normal:     #16a34a;
+      --normal-lt:  #dcfce7;
+      --alert:      #dc2626;
+      --alert-lt:   #fee2e2;
+      --stale:      #dc2626;
+      --stale-lt:   #fee2e2;
+      --mono:       'DM Mono', monospace;
+      --sans:       'Outfit', sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      padding: 2.5rem 3rem;
+      max-width: 1140px;
+      margin: 0 auto;
+    }
+
+    @media (max-width: 680px) { body { padding: 1.5rem; } }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2.5rem;
+    }
+
+    .logo { display: flex; align-items: center; gap: 0.75rem; }
+
+    .logo-mark {
+      width: 36px; height: 36px;
+      background: var(--orange);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 1rem;
+    }
+
+    .logo-text  { font-size: 1rem; font-weight: 600; color: var(--text); }
+    .logo-sub   { font-size: 0.7rem; color: var(--muted); font-weight: 400; }
+
+    .broker-status {
+      display: flex; align-items: center; gap: 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 0.4rem 0.9rem;
+      font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
+    }
+
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.4s, box-shadow 0.4s;
+    }
+    .dot.on  { background: var(--normal); box-shadow: 0 0 5px var(--normal); }
+    .dot.err { background: var(--alert); }
+
+    /* summary */
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem; margin-bottom: 1.5rem;
+    }
+    @media (max-width: 680px) { .summary { grid-template-columns: 1fr 1fr; } }
+
+    .summary-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+    }
+    .summary-label {
+      font-size: 0.65rem; font-weight: 500;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 0.4rem;
+    }
+    .summary-val {
+      font-family: var(--mono); font-size: 1.5rem;
+      font-weight: 400; color: var(--text); line-height: 1;
+    }
+    .summary-val.orange { color: var(--orange); }
+    .summary-sub { font-size: 0.65rem; color: var(--muted); margin-top: 0.25rem; }
+
+    /* rooms */
+    .rooms { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    @media (max-width: 680px) { .rooms { grid-template-columns: 1fr; } }
+
+    .room-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 16px; overflow: hidden;
+      transition: border-color 0.4s;
+    }
+    .room-card.state-cold   { border-color: var(--cold); }
+    .room-card.state-normal { border-color: var(--normal); }
+    .room-card.state-alert  { border-color: var(--alert); }
+    .room-card.state-stale  { border-color: var(--stale); opacity: 0.75; }
+
+    .room-header {
+      padding: 1.25rem 1.5rem 1rem;
+      display: flex; justify-content: space-between; align-items: flex-start;
+    }
+
+    .room-number {
+      font-size: 0.65rem; font-weight: 600;
+      letter-spacing: 0.15em; text-transform: uppercase;
+      color: var(--orange); margin-bottom: 0.2rem;
+    }
+    .room-name { font-size: 1.3rem; font-weight: 600; color: var(--text); }
+
+    .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem; }
+
+    .state-badge {
+      font-family: var(--mono); font-size: 0.65rem;
+      letter-spacing: 0.1em; font-weight: 500;
+      padding: 0.3rem 0.7rem; border-radius: 6px; text-transform: uppercase;
+    }
+    .state-badge.cold   { background: var(--cold-lt);   color: var(--cold); }
+    .state-badge.normal { background: var(--normal-lt); color: var(--normal); }
+    .state-badge.alert  { background: var(--alert-lt);  color: var(--alert); animation: flash 1s infinite; }
+    .state-badge.stale  { background: var(--stale-lt);  color: var(--stale); }
+
+    .lastseen-badge {
+      font-family: var(--mono); font-size: 0.6rem;
+      padding: 0.2rem 0.6rem; border-radius: 6px;
+      letter-spacing: 0.06em;
+      background: var(--bg); color: var(--muted);
+      border: 1px solid var(--border);
+      transition: background 0.4s, color 0.4s, border-color 0.4s;
+    }
+    .lastseen-badge.stale {
+      background: var(--stale-lt); color: var(--stale);
+      border-color: var(--stale);
+      animation: flash 1.5s infinite;
+    }
+
+    @keyframes flash { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    .accent-bar {
+      height: 3px; background: var(--border);
+      margin: 0 1.5rem; border-radius: 2px; overflow: hidden;
+    }
+    .accent-bar-fill {
+      height: 100%; width: 0%; border-radius: 2px;
+      background: var(--orange); transition: width 0.6s ease;
+    }
+    .room-card.state-cold   .accent-bar-fill { background: var(--cold);   width: 40%; }
+    .room-card.state-normal .accent-bar-fill { background: var(--normal); width: 70%; }
+    .room-card.state-alert  .accent-bar-fill { background: var(--alert);  width: 100%; }
+    .room-card.state-stale  .accent-bar-fill { background: var(--stale);  width: 100%; }
+
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+
+    .metric {
+      padding: 1.25rem 1.5rem;
+      border-top: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+    }
+    .metric:nth-child(even) { border-right: none; }
+
+    .metric-label {
+      font-size: 0.62rem; font-weight: 500;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 0.4rem;
+    }
+    .metric-value {
+      font-family: var(--mono); font-size: 1.75rem;
+      font-weight: 300; color: var(--text); line-height: 1;
+    }
+    .metric-value .unit { font-size: 0.85rem; color: var(--muted); }
+    .metric-value.temp-cold   { color: var(--cold); }
+    .metric-value.temp-normal { color: var(--normal); }
+    .metric-value.temp-alert  { color: var(--alert); }
+    .metric-sub { font-family: var(--mono); font-size: 0.62rem; color: var(--muted); margin-top: 0.3rem; }
+
+    .room-footer {
+      padding: 0.75rem 1.5rem;
+      border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between;
+      font-family: var(--mono); font-size: 0.6rem; color: var(--muted);
+      background: var(--bg);
+    }
+
+    .waiting {
+      padding: 2.5rem 1.5rem;
+      font-family: var(--mono); font-size: 0.72rem;
+      color: var(--muted); letter-spacing: 0.06em;
+    }
+
+    .log-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1rem 1.5rem;
+    }
+    .log-title {
+      font-size: 0.62rem; font-weight: 600;
+      letter-spacing: 0.15em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 0.6rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .log-title::before {
+      content: ''; display: inline-block;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--orange);
+    }
+    #log { list-style: none; max-height: 88px; overflow-y: auto; }
+    #log li {
+      font-family: var(--mono); font-size: 0.63rem; color: var(--muted);
+      padding: 0.2rem 0; border-bottom: 1px solid var(--border);
+      display: flex; gap: 1rem;
+    }
+    #log li .ts { color: var(--orange); min-width: 68px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-mark">⬡</div>
+    <div>
+      <div class="logo-text">Room Monitor</div>
+      <div class="logo-sub">Multi-Room Environmental Agent</div>
+    </div>
+  </div>
+  <div class="broker-status">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">connecting…</span>
+  </div>
+</header>
+
+<div class="summary">
+  <div class="summary-card">
+    <div class="summary-label">Avg Temperature</div>
+    <div class="summary-val orange" id="avg-temp">—</div>
+    <div class="summary-sub">both rooms</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-label">Avg Humidity</div>
+    <div class="summary-val" id="avg-hum">—</div>
+    <div class="summary-sub">both rooms</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-label">Room 1 State</div>
+    <div class="summary-val" id="sum-state1">—</div>
+    <div class="summary-sub">current status</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-label">Room 2 State</div>
+    <div class="summary-val" id="sum-state2">—</div>
+    <div class="summary-sub">current status</div>
+  </div>
+</div>
+
+<div class="rooms">
+  <!-- Room 1 -->
+  <div class="room-card" id="card1">
+    <div class="room-header">
+      <div>
+        <div class="room-number">Station 01</div>
+        <div class="room-name">Room 1</div>
+      </div>
+      <div class="badges">
+        <div class="state-badge" id="badge1">—</div>
+        <div class="lastseen-badge" id="ls1">no data</div>
+      </div>
+    </div>
+    <div class="accent-bar"><div class="accent-bar-fill"></div></div>
+    <div id="body1" class="waiting">awaiting data…</div>
+    <div class="room-footer">
+      <span>ase/room1/sensors</span>
+      <span id="ts1">—</span>
+    </div>
+  </div>
+
+  <!-- Room 2 -->
+  <div class="room-card" id="card2">
+    <div class="room-header">
+      <div>
+        <div class="room-number">Station 02</div>
+        <div class="room-name">Room 2</div>
+      </div>
+      <div class="badges">
+        <div class="state-badge" id="badge2">—</div>
+        <div class="lastseen-badge" id="ls2">no data</div>
+      </div>
+    </div>
+    <div class="accent-bar"><div class="accent-bar-fill"></div></div>
+    <div id="body2" class="waiting">awaiting data…</div>
+    <div class="room-footer">
+      <span>ase/room2/sensors</span>
+      <span id="ts2">—</span>
+    </div>
+  </div>
+</div>
+
+<div class="log-card">
+  <div class="log-title">Event log</div>
+  <ul id="log"></ul>
+</div>
+
+<script>
+  const BROKER   = 'wss://broker.hivemq.com:8884/mqtt';
+  const TOPICS   = ['ase/room1/sensors','ase/room2/sensors'];
+  const data     = { 1: null, 2: null };
+  const lastRx   = { 1: null, 2: null };
+  const STALE_MS = 30000;
+
+  const client = mqtt.connect(BROKER, {
+    clientId: 'dash_' + Math.random().toString(16).substr(2,8),
+    clean: true,
+  });
+
+  function addLog(msg) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('en-GB')}</span><span>${msg}</span>`;
+    const list = document.getElementById('log');
+    list.prepend(li);
+    if (list.children.length > 40) list.removeChild(list.lastChild);
+  }
+
+  client.on('connect', () => {
+    document.getElementById('dot').className = 'dot on';
+    document.getElementById('status-text').textContent = 'broker.hivemq.com';
+    TOPICS.forEach(t => client.subscribe(t));
+    addLog('connected — subscribed to both topics');
+  });
+
+  client.on('error', err => {
+    document.getElementById('dot').className = 'dot err';
+    document.getElementById('status-text').textContent = 'error';
+    addLog('error: ' + err.message);
+  });
+
+  client.on('offline', () => {
+    document.getElementById('dot').className = 'dot err';
+    document.getElementById('status-text').textContent = 'offline';
+  });
+
+  client.on('message', (topic, payload) => {
+    try {
+      const d = JSON.parse(payload.toString());
+      const n = d.room;
+      data[n]   = d;
+      lastRx[n] = Date.now();
+      renderRoom(n, d);
+      updateSummary();
+      addLog(`room${n} — ${d.temp_dht.toFixed(1)}°C  ${d.hum.toFixed(1)}% RH  LDR ${d.ldr}  ${d.state}`);
+    } catch(e) { addLog('parse error'); }
+  });
+
+  function sc(state) {
+    if (state === 'COLD')  return 'cold';
+    if (state === 'ALERT') return 'alert';
+    return 'normal';
+  }
+
+  function renderRoom(n, d) {
+    const cls = sc(d.state);
+    document.getElementById('card'+n).className = 'room-card state-' + cls;
+
+    const badge = document.getElementById('badge'+n);
+    badge.textContent = d.state;
+    badge.className   = 'state-badge ' + cls;
+
+    document.getElementById('body'+n).className = 'metrics';
+    document.getElementById('body'+n).innerHTML = `
+      <div class="metric">
+        <div class="metric-label">Temperature</div>
+        <div class="metric-value temp-${cls}">${d.temp_dht.toFixed(1)}<span class="unit"> °C</span></div>
+        <div class="metric-sub">TC74: ${d.temp_tc74}°C</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Humidity</div>
+        <div class="metric-value">${d.hum.toFixed(1)}<span class="unit"> %</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Light (LDR)</div>
+        <div class="metric-value">${d.ldr}<span class="unit"> raw</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">TC74 Temp</div>
+        <div class="metric-value">${d.temp_tc74}<span class="unit"> °C</span></div>
+        <div class="metric-sub">secondary sensor</div>
+      </div>
+    `;
+
+    document.getElementById('ts'+n).textContent =
+      'updated ' + new Date().toLocaleTimeString('en-GB');
+  }
+
+  function updateSummary() {
+    const both = [data[1], data[2]].filter(Boolean);
+    if (!both.length) return;
+    const avgTemp = (both.reduce((s,d) => s + d.temp_dht, 0) / both.length).toFixed(1);
+    const avgHum  = (both.reduce((s,d) => s + d.hum,      0) / both.length).toFixed(1);
+    document.getElementById('avg-temp').textContent = avgTemp + '°C';
+    document.getElementById('avg-hum').textContent  = avgHum  + '%';
+    if (data[1]) document.getElementById('sum-state1').textContent = data[1].state;
+    if (data[2]) document.getElementById('sum-state2').textContent = data[2].state;
+  }
+
+  /* last seen ticker */
+  function formatAge(ms) {
+    if (ms < 5000)  return 'just now';
+    if (ms < 60000) return Math.floor(ms/1000) + 's ago';
+    return Math.floor(ms/60000) + 'm ago';
+  }
+
+  setInterval(() => {
+    [1, 2].forEach(n => {
+      if (!lastRx[n]) return;
+      const age   = Date.now() - lastRx[n];
+      const stale = age > STALE_MS;
+      const lsBadge = document.getElementById('ls'+n);
+      const card    = document.getElementById('card'+n);
+
+      lsBadge.textContent = formatAge(age);
+      lsBadge.className   = 'lastseen-badge' + (stale ? ' stale' : '');
+
+      if (stale) card.className = 'room-card state-stale';
+    });
+  }, 1000);
+</script>
+</body>
+</html>

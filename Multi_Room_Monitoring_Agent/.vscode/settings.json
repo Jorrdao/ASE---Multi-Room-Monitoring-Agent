@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c6-builtin.cfg"
   ],
-  "idf.port": "detect",
+  "idf.port": "/dev/ttyUSB0",
   "idf.currentSetup": "/home/jorrdao/esp/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c6"
