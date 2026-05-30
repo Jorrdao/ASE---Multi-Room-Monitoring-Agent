@@ -1,3 +1,25 @@
-idf_component_register(SRCS "hello_world_main.c"
-                       PRIV_REQUIRES spi_flash
-                       INCLUDE_DIRS "")
+idf_component_register(
+    SRCS
+        "main.c"
+        "tasks/sensor_task.c"
+        "tasks/display_task.c"
+        "tasks/mqtt_task.c"
+        "tasks/sd_task.c"
+    INCLUDE_DIRS
+        "."
+        "tasks"
+    REQUIRES
+        esp_driver_i2c
+        esp_adc
+        driver
+        spi_flash
+        fatfs
+        sdmmc
+        st7735_driver
+        esp_wifi
+        mqtt
+        nvs_flash
+        esp_netif
+        esp_event
+        esp_timer
+)
