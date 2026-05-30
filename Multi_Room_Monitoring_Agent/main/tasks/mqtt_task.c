@@ -1,19 +1,6 @@
 /**
  * @file mqtt_task.c
- * @brief WiFi connection + MQTT publish to HiveMQ public broker.
- *
- * Publishes JSON payload to:
- *   ase/room1/sensors  (or room2 depending on ROOM_ID)
- *
- * Payload format:
- *   {
- *     "room": 1,
- *     "temp_dht": 27.3,
- *     "hum": 56.2,
- *     "temp_tc74": 27,
- *     "ldr": 1024,
- *     "state": "NORMAL"
- *   }
+ * @brief WiFi connect → publish → WiFi disconnect cycle with sys_state updates.
  */
 
 #include <stdio.h>
@@ -32,7 +19,6 @@
 
 static const char *TAG = "MQTT";
 
-/* ── WiFi credentials — set via menuconfig ───────────────────────────── */
 #ifndef WIFI_SSID
 #define WIFI_SSID      CONFIG_WIFI_SSID
 #endif
@@ -40,60 +26,52 @@ static const char *TAG = "MQTT";
 #define WIFI_PASSWORD  CONFIG_WIFI_PASSWORD
 #endif
 
-/* ── HiveMQ public broker ────────────────────────────────────────────── */
 #define MQTT_BROKER_URI "mqtt://broker.hivemq.com:1883"
 
-/* ── MQTT topic ──────────────────────────────────────────────────────── */
 #if ROOM_ID == 1
-#define MQTT_TOPIC      "ase/room1/sensors"
+#define MQTT_TOPIC "ase/room1/sensors"
 #else
-#define MQTT_TOPIC      "ase/room2/sensors"
+#define MQTT_TOPIC "ase/room2/sensors"
 #endif
 
-/* ── WiFi event group ────────────────────────────────────────────────── */
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
 #define WIFI_MAX_RETRIES    5
 
-static EventGroupHandle_t s_wifi_event_group;
-static int                s_retry_count = 0;
-static esp_mqtt_client_handle_t s_mqtt_client = NULL;
-static bool s_mqtt_connected = false;
+static EventGroupHandle_t  s_wifi_eg;
+static int                 s_retry = 0;
+static bool                s_wifi_initialised = false;
 
-/* ═══════════════════════════════════════════════════════════════════════
- * WiFi event handler
- * ═══════════════════════════════════════════════════════════════════════ */
-static void wifi_event_handler(void *arg, esp_event_base_t base,
-                                int32_t event_id, void *event_data)
+static void set_sys_state(sys_state_t state)
 {
-    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+    g_sensor_data.sys_state = state;
+    xSemaphoreGive(g_data_mutex);
+}
+
+static void wifi_handler(void *arg, esp_event_base_t base,
+                         int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-    } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        s_mqtt_connected = false;
-        if (s_retry_count < WIFI_MAX_RETRIES) {
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry < WIFI_MAX_RETRIES) {
             esp_wifi_connect();
-            s_retry_count++;
-            ESP_LOGW(TAG, "WiFi disconnected, retrying (%d/%d)",
-                     s_retry_count, WIFI_MAX_RETRIES);
+            s_retry++;
         } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-            ESP_LOGE(TAG, "WiFi connection failed after %d retries", WIFI_MAX_RETRIES);
+            xEventGroupSetBits(s_wifi_eg, WIFI_FAIL_BIT);
         }
-    } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_count = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        s_retry = 0;
+        xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
- * WiFi init
- * ═══════════════════════════════════════════════════════════════════════ */
-static bool wifi_init(void)
+static void wifi_init_once(void)
 {
-    s_wifi_event_group = xEventGroupCreate();
+    if (s_wifi_initialised) return;
 
+    s_wifi_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
@@ -101,20 +79,12 @@ static bool wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        wifi_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        wifi_handler, NULL, NULL);
 
-    wifi_config_t wifi_cfg = {
+    wifi_config_t wcfg = {
         .sta = {
             .ssid     = WIFI_SSID,
             .password = WIFI_PASSWORD,
@@ -122,65 +92,47 @@ static bool wifi_init(void)
         },
     };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wcfg));
+
+    s_wifi_initialised = true;
+    ESP_LOGI(TAG, "WiFi driver initialised");
+}
+
+static bool wifi_connect(void)
+{
+    xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry = 0;
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* Wait for connection */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(15000));
+                                           pdMS_TO_TICKS(10000));
     if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "WiFi connected");
         return true;
     }
-    ESP_LOGE(TAG, "WiFi init failed");
+    ESP_LOGW(TAG, "WiFi connect failed");
+    esp_wifi_stop();
     return false;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
- * MQTT event handler
- * ═══════════════════════════════════════════════════════════════════════ */
+static void wifi_disconnect(void)
+{
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    ESP_LOGI(TAG, "WiFi disconnected");
+}
+
+static bool mqtt_connected = false;
+
 static void mqtt_event_handler(void *arg, esp_event_base_t base,
-                                int32_t event_id, void *event_data)
+                                int32_t id, void *data)
 {
-    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
-    switch (event->event_id) {
-        case MQTT_EVENT_CONNECTED:
-            ESP_LOGI(TAG, "MQTT connected to %s", MQTT_BROKER_URI);
-            s_mqtt_connected = true;
-            break;
-        case MQTT_EVENT_DISCONNECTED:
-            ESP_LOGW(TAG, "MQTT disconnected");
-            s_mqtt_connected = false;
-            break;
-        case MQTT_EVENT_PUBLISHED:
-            ESP_LOGI(TAG, "MQTT published msg_id=%d", event->msg_id);
-            break;
-        case MQTT_EVENT_ERROR:
-            ESP_LOGE(TAG, "MQTT error");
-            break;
-        default:
-            break;
-    }
+    if (id == MQTT_EVENT_CONNECTED)    mqtt_connected = true;
+    if (id == MQTT_EVENT_DISCONNECTED) mqtt_connected = false;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
- * MQTT init
- * ═══════════════════════════════════════════════════════════════════════ */
-static void mqtt_init(void)
-{
-    esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
-    };
-    s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(s_mqtt_client, ESP_EVENT_ANY_ID,
-                                   mqtt_event_handler, NULL);
-    esp_mqtt_client_start(s_mqtt_client);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
- * Build JSON payload
- * ═══════════════════════════════════════════════════════════════════════ */
 static void build_payload(sensor_data_t *d, char *buf, size_t len)
 {
     const char *state_str;
@@ -189,32 +141,59 @@ static void build_payload(sensor_data_t *d, char *buf, size_t len)
         case STATE_ALERT:  state_str = "ALERT";  break;
         default:           state_str = "NORMAL"; break;
     }
-
     snprintf(buf, len,
-             "{"
-             "\"room\":%d,"
-             "\"temp_dht\":%.2f,"
-             "\"hum\":%.2f,"
-             "\"temp_tc74\":%d,"
-             "\"ldr\":%d,"
-             "\"state\":\"%s\""
-             "}",
-             ROOM_ID,
-             d->dht20_temp,
-             d->dht20_hum,
-             d->tc74_temp,
-             d->ldr_raw,
-             state_str);
+             "{\"room\":%d,\"temp_dht\":%.2f,\"hum\":%.2f,"
+             "\"temp_tc74\":%d,\"ldr\":%d,\"state\":\"%s\"}",
+             ROOM_ID, d->dht20_temp, d->dht20_hum,
+             d->tc74_temp, d->ldr_raw, state_str);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
- * Task
- * ═══════════════════════════════════════════════════════════════════════ */
+static void mqtt_publish_and_disconnect(void)
+{
+    esp_mqtt_client_config_t cfg = {
+        .broker.address.uri = MQTT_BROKER_URI,
+    };
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID,
+                                   mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+
+    int wait = 0;
+    while (!mqtt_connected && wait < 60) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wait++;
+    }
+
+    if (mqtt_connected) {
+        sensor_data_t local;
+        xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+        memcpy(&local, &g_sensor_data, sizeof(sensor_data_t));
+        xSemaphoreGive(g_data_mutex);
+
+        char payload[256];
+        build_payload(&local, payload, sizeof(payload));
+
+        int msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC,
+                                              payload, 0, 1, 0);
+        if (msg_id >= 0)
+            ESP_LOGI(TAG, "Published: %s", payload);
+        else
+            ESP_LOGW(TAG, "Publish failed");
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    } else {
+        ESP_LOGW(TAG, "MQTT broker unreachable");
+    }
+
+    esp_mqtt_client_stop(client);
+    esp_mqtt_client_destroy(client);
+    mqtt_connected = false;
+}
+
 void mqtt_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "MQTT task started");
 
-    /* NVS required for WiFi */
     esp_err_t nvs_err = nvs_flash_init();
     if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
         nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -223,51 +202,21 @@ void mqtt_task(void *pvParameters)
     }
     ESP_ERROR_CHECK(nvs_err);
 
-    if (!wifi_init()) {
-        ESP_LOGE(TAG, "WiFi failed — MQTT task exiting");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    mqtt_init();
-
-    /* Wait for MQTT connection */
-    int wait = 0;
-    while (!s_mqtt_connected && wait < 30) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-        wait++;
-    }
-
-    if (!s_mqtt_connected) {
-        ESP_LOGE(TAG, "MQTT broker unreachable — task exiting");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    sensor_data_t local_data = {0};
-    char payload[256];
+    wifi_init_once();
 
     while (1) {
-        /* Copy shared data */
-        xSemaphoreTake(g_data_mutex, portMAX_DELAY);
-        memcpy(&local_data, &g_sensor_data, sizeof(sensor_data_t));
-        xSemaphoreGive(g_data_mutex);
+        /* Connecting */
+        set_sys_state(SYS_CONNECTING);
 
-        if (s_mqtt_connected) {
-            build_payload(&local_data, payload, sizeof(payload));
-            int msg_id = esp_mqtt_client_publish(s_mqtt_client,
-                                                  MQTT_TOPIC,
-                                                  payload, 0,
-                                                  1,    /* QoS 1 */
-                                                  0);   /* not retained */
-            if (msg_id >= 0) {
-                ESP_LOGI(TAG, "Published to %s: %s", MQTT_TOPIC, payload);
-            } else {
-                ESP_LOGW(TAG, "Publish failed");
-            }
-        } else {
-            ESP_LOGW(TAG, "MQTT not connected, skipping publish");
+        if (wifi_connect()) {
+            /* Publishing */
+            set_sys_state(SYS_PUBLISHING);
+            mqtt_publish_and_disconnect();
+            wifi_disconnect();
         }
+
+        /* Back to sleeping */
+        set_sys_state(SYS_SLEEPING);
 
         vTaskDelay(pdMS_TO_TICKS(MQTT_INTERVAL_MS));
     }
